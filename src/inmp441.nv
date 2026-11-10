@@ -122,8 +122,8 @@ pub fn sck_hz(c: MicConfig) -> Int
 pub fn rate_ok(c: MicConfig) -> Bool
     let f = sck_hz(c)
     match c.part
-        MicPart.MicInmp441  => f >= 500000 and f <= 3200000
-        MicPart.MicSph0645  => f >= 2048000 and f <= 4096000
+        MicPart.MicInmp441 => f >= 500000 and f <= 3200000
+        MicPart.MicSph0645 => f >= 2048000 and f <= 4096000
 
 // The settings the board's `I2s` handle gets: 32-bit slots, two channels,
 // the board driving the clocks, Philips framing.
@@ -219,9 +219,9 @@ let DC_SHIFT = 12
 // 65536th of a count of a constant offset; the step is rounded and so is
 // the estimate subtracted, which leaves no bias of one count for a
 // positive offset.
-let DC_FRAC = 16
+let DC_FRAC  = 16
 let DC_ROUND = 2048
-let DC_HALF = 32768
+let DC_HALF  = 32768
 
 // Removes a slowly moving offset from the first `n` samples of `buf`, in
 // place, and answers the state after them.  The estimate follows each

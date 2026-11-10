@@ -17,6 +17,20 @@ the device program builds for the nRF52840-DK and the nRF54LM20-DK against
 a stand-in handle that refuses to be configured. A sample from a part on a
 board has not been taken.
 
+## Install
+
+```sh
+novo pkg add inmp441-nv
+```
+
+The device program is `examples/mic_level.nv`.  Make it the `main` of a package that
+depends on this one and build it for a board:
+
+```sh
+novo build --target=nrf52840-dk src/main.nv
+novo build --target=nrf54lm20-dk src/main.nv
+```
+
 ## The device program
 
 `examples/mic_level.nv` reads an INMP441 at 16 kHz and prints the peak of
