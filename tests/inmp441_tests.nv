@@ -1,0 +1,445 @@
+// inmp441_tests — the package over a double of the board's I2S handle.
+//
+// The double records what the driver configured and answers the words a
+// test scripted, as the 32-bit slot words of a stereo frame in the order
+// the part sends them: left word, right word, left word, and so on.  Every
+// expected sample below is derived by hand from the data sheet's frame
+// (24-bit two's complement, MSB first, in the top of a 32-bit slot, the
+// last eight bits of the slot not driven) and not by calling the function
+// being checked.
+//
+// The double's state, in `st`: 0 configure calls, 1 sample rate, 2 bit
+// depth, 3 channels, 4 role (0 master, 1 slave), 5 format (0 Philips, 1
+// left-justified), 6 enabled, 7 read position, 8 refuse configure, 9
+// xruns, 10 disable calls, 11 receive calls, 12 words asked by the last
+// receive, 13 refuse enable, 14 the receive call that answers short (0 for
+// none).  `words` is the script.
+
+use std.test
+use embedded_hal.{ I2s, I2sConfig, I2sRole, I2sFormat }
+use dev_audio.{ AudioFormat, AudioFraming, Microphone, MilliDb }
+use inmp441
+use inmp441.{ MicConfig, MicPart, DcState }
+
+struct Link
+    st: HashMap<Int, Int>
+    words: HashMap<Int, Int>
+
+fn at(m: HashMap<Int, Int>, k: Int) -> Int
+    m.get(k) ?? 0
+
+fn link() -> Link
+    Link { st: HashMap.new(), words: HashMap.new() }
+
+impl I2s for Link
+    fn configure(self, c: I2sConfig) -> Bool [hw]
+        self.st.insert(0, at(self.st, 0) + 1)
+        if at(self.st, 8) == 1
+            return false
+        self.st.insert(1, c.sample_rate)
+        self.st.insert(2, c.bit_depth)
+        self.st.insert(3, c.channels)
+        if c.role == I2sRole.I2sMaster
+            self.st.insert(4, 0)
+        else
+            self.st.insert(4, 1)
+        if c.format == I2sFormat.I2sPhilips
+            self.st.insert(5, 0)
+        else
+            self.st.insert(5, 1)
+        true
+
+    fn sample_rate(self) -> Int [hw]
+        at(self.st, 1)
+
+    fn enable(self) -> Bool [hw]
+        if at(self.st, 13) == 1
+            return false
+        self.st.insert(6, 1)
+        true
+
+    fn disable(self) [hw]
+        self.st.insert(6, 0)
+        self.st.insert(10, at(self.st, 10) + 1)
+
+    fn transmit(self, var buf: Vec[i32; 256]) -> Int [hw]
+        -1
+
+    fn receive(self, var buf: Vec[i32; 256], n: Int) -> Int [hw]
+        if at(self.st, 6) == 0 or n > 256
+            return -1
+        let calls = at(self.st, 11) + 1
+        self.st.insert(11, calls)
+        self.st.insert(12, n)
+        if calls == at(self.st, 14)
+            return n - 1
+        buf.clear()
+        let pos = at(self.st, 7)
+        for k in 0..n
+            let _ = buf.push(at(self.words, pos + k) as i32)
+        self.st.insert(7, pos + n)
+        n
+
+    fn xruns(self) -> Int [hw]
+        at(self.st, 9)
+
+// Scripts the stereo frames `(left, right)` from index 0.
+fn script(l: Link, frames: [(Int, Int)])
+    var i = 0
+    for f in frames
+        l.words.insert(i, f.0)
+        l.words.insert(i + 1, f.1)
+        i = i + 2
+
+fn cfg_l() -> MicConfig
+    inmp441.config_inmp441(48000, false)
+
+fn cfg_r() -> MicConfig
+    inmp441.config_inmp441(48000, true)
+
+// ── The configuration ────────────────────────────────────────────────
+
+@test
+fn test_the_two_configurations() [io]
+    let a = inmp441.config_inmp441(16000, true)
+    test.assert(a.part == MicPart.MicInmp441)
+    test.assert_eq(a.sample_rate, 16000)
+    test.assert(a.right)
+    test.assert_eq(a.dc_offset, 0)
+    test.assert(not a.standby_wake)
+    test.assert_eq(a.late_bits, 0)
+    let b = inmp441.config_sph0645(44100, false)
+    test.assert(b.part == MicPart.MicSph0645)
+    test.assert_eq(b.sample_rate, 44100)
+    test.assert(not b.right)
+
+@test
+fn test_the_bit_clock_is_64_cycles_per_frame() [io]
+    test.assert_eq(inmp441.sck_hz(cfg_l()), 3072000)
+    test.assert_eq(inmp441.sck_hz(inmp441.config_inmp441(16000, false)), 1024000)
+
+// Table 3: fSCK 0.5 to 3.2 MHz is 7813 to 50000 Hz at 64 cycles; the
+// SPH0645LM4H takes 2.048 to 4.096 MHz, 32000 to 64000 Hz.
+@test
+fn test_the_clock_ranges_of_the_two_parts() [io]
+    test.assert(not inmp441.rate_ok(inmp441.config_inmp441(7812, false)))
+    test.assert(inmp441.rate_ok(inmp441.config_inmp441(7813, false)))
+    test.assert(inmp441.rate_ok(inmp441.config_inmp441(50000, false)))
+    test.assert(not inmp441.rate_ok(inmp441.config_inmp441(50001, false)))
+    test.assert(not inmp441.rate_ok(inmp441.config_sph0645(31999, false)))
+    test.assert(inmp441.rate_ok(inmp441.config_sph0645(32000, false)))
+    test.assert(inmp441.rate_ok(inmp441.config_sph0645(64000, false)))
+    test.assert(not inmp441.rate_ok(inmp441.config_sph0645(64001, false)))
+
+@test
+fn test_the_i2s_settings_and_the_format_of_the_samples() [io]
+    let c = inmp441.i2s_config_of(cfg_l())
+    test.assert_eq(c.sample_rate, 48000)
+    test.assert_eq(c.bit_depth, 32)
+    test.assert_eq(c.channels, 2)
+    test.assert(c.role == I2sRole.I2sMaster)
+    test.assert(c.format == I2sFormat.I2sPhilips)
+    let f = inmp441.format_of(cfg_l())
+    test.assert_eq(f.sample_rate, 48000)
+    test.assert_eq(f.bit_depth, 24)
+    test.assert_eq(f.channels, 1)
+    test.assert(f.framing == AudioFraming.AudioPhilips)
+    test.assert(not f.codec_is_master)
+
+// 2^18 cycles at 3.072 MHz is 85.33 ms, rounded up to a microsecond; at
+// 16 kHz the clock is 1.024 MHz and the time 256 ms exactly.  From
+// standby it is 2^14 cycles, 5.33 ms.  The SPH0645LM4H's is its 50 ms.
+@test
+fn test_the_start_up_times() [io]
+    test.assert_eq(inmp441.startup_us(cfg_l()), 85334)
+    test.assert_eq(inmp441.startup_us(inmp441.config_inmp441(16000, false)), 256000)
+    let w = MicConfig { part: MicPart.MicInmp441, sample_rate: 48000, right: false, dc_offset: 0,
+                        standby_wake: true, late_bits: 0 }
+    test.assert_eq(inmp441.startup_us(w), 5334)
+    test.assert_eq(inmp441.startup_us(inmp441.config_sph0645(48000, false)), 50000)
+
+// ── The words ────────────────────────────────────────────────────────
+
+// 0x123456 in the top of the slot with 0xA5 in the byte the part does not
+// drive reads 0x123456; -2 is 0xFFFFFE, the slot word -512, and a noise
+// byte of 0x3C makes it -452, which still reads -2.
+@test
+fn test_the_low_byte_of_the_slot_is_not_data() [io]
+    test.assert_eq(inmp441.unpack(cfg_l(), 305419941), 1193046)
+    test.assert_eq(inmp441.unpack(cfg_l(), -452), -2)
+    test.assert_eq(inmp441.unpack(cfg_l(), -512), -2)
+    test.assert_eq(inmp441.unpack(cfg_l(), 0), 0)
+
+@test
+fn test_the_extremes_of_the_24_bit_word() [io]
+    test.assert_eq(inmp441.unpack(cfg_l(), 2147483392), 8388607)
+    test.assert_eq(inmp441.unpack(cfg_l(), -2147483648), -8388608)
+
+// A word 18 bits wide: -3 is -192 in 24 bits, the slot word -49152; the
+// six low bits of the 24 and the low byte hold stray bits that must not
+// reach the sample.
+@test
+fn test_the_sph0645_clears_the_six_bits_it_does_not_use() [io]
+    let c = inmp441.config_sph0645(48000, false)
+    test.assert_eq(inmp441.unpack(c, -49152), -192)
+    test.assert_eq(inmp441.unpack(c, -32939), -192)
+    test.assert_eq(inmp441.unpack(c, 2147467264), 8388544)
+    test.assert_eq(inmp441.unpack(cfg_l(), -32939), -129)
+
+@test
+fn test_the_offset_is_removed_after_the_shift() [io]
+    let c = MicConfig { part: MicPart.MicInmp441, sample_rate: 48000, right: false, dc_offset: 100,
+                        standby_wake: false, late_bits: 0 }
+    test.assert_eq(inmp441.unpack(c, 305419941), 1192946)
+    test.assert_eq(inmp441.unpack(c, 0), -100)
+
+// A receiver that reads the word one bit late sees it doubled: 0x123456
+// reads as 0x2468AC00 in the slot.
+@test
+fn test_late_bits_undo_a_shift_the_receiver_made() [io]
+    let c = MicConfig { part: MicPart.MicInmp441, sample_rate: 48000, right: false, dc_offset: 0,
+                        standby_wake: false, late_bits: 1 }
+    test.assert_eq(inmp441.unpack(c, 610839552), 1193046)
+
+@test
+fn test_the_slot_the_pin_names() [io]
+    test.assert_eq(inmp441.slot_of(cfg_l()), 0)
+    test.assert_eq(inmp441.slot_of(cfg_r()), 1)
+
+// ── Reading the handle ───────────────────────────────────────────────
+
+// Three frames, left words 0x100, 0x200, 0x300 as 24-bit samples and the
+// right slot of each frame holding another microphone's words.
+fn three_frames(l: Link)
+    script(l, [(256 * 256, -256), (512 * 256, 7680), (768 * 256, 1 << 20)])
+
+@test
+fn test_the_left_microphone_keeps_the_even_words() [io, hw]
+    let l = link()
+    l.st.insert(6, 1)
+    three_frames(l)
+    var buf: Vec[i32; 256] = Vec.new()
+    test.assert(inmp441.read_samples(l, cfg_l(), var buf, 3))
+    test.assert_eq(buf.len(), 3)
+    test.assert_eq(buf[0] as Int, 256)
+    test.assert_eq(buf[1] as Int, 512)
+    test.assert_eq(buf[2] as Int, 768)
+    test.assert_eq(at(l.st, 12), 6)
+
+@test
+fn test_the_right_microphone_keeps_the_odd_words() [io, hw]
+    let l = link()
+    l.st.insert(6, 1)
+    three_frames(l)
+    var buf: Vec[i32; 256] = Vec.new()
+    test.assert(inmp441.read_samples(l, cfg_r(), var buf, 3))
+    test.assert_eq(buf[0] as Int, -1)
+    test.assert_eq(buf[1] as Int, 30)
+    test.assert_eq(buf[2] as Int, 4096)
+
+@test
+fn test_a_read_replaces_what_the_buffer_held() [io, hw]
+    let l = link()
+    l.st.insert(6, 1)
+    three_frames(l)
+    var buf: Vec[i32; 256] = Vec.new()
+    let _ = buf.push(99 as i32)
+    let _ = buf.push(98 as i32)
+    let _ = buf.push(97 as i32)
+    let _ = buf.push(96 as i32)
+    test.assert(inmp441.read_samples(l, cfg_l(), var buf, 2))
+    test.assert_eq(buf.len(), 2)
+    test.assert_eq(buf[0] as Int, 256)
+
+@test
+fn test_zero_samples_ask_the_handle_for_nothing() [io, hw]
+    let l = link()
+    l.st.insert(6, 1)
+    var buf: Vec[i32; 256] = Vec.new()
+    let _ = buf.push(5 as i32)
+    test.assert(inmp441.read_samples(l, cfg_l(), var buf, 0))
+    test.assert_eq(buf.len(), 0)
+    test.assert_eq(at(l.st, 11), 0)
+
+@test
+fn test_a_count_outside_0_to_256_is_refused_with_an_empty_buffer() [io, hw]
+    let l = link()
+    l.st.insert(6, 1)
+    var buf: Vec[i32; 256] = Vec.new()
+    let _ = buf.push(5 as i32)
+    test.assert(not inmp441.read_samples(l, cfg_l(), var buf, 257))
+    test.assert_eq(buf.len(), 0)
+    let _ = buf.push(5 as i32)
+    test.assert(not inmp441.read_samples(l, cfg_l(), var buf, -1))
+    test.assert_eq(buf.len(), 0)
+    test.assert_eq(at(l.st, 11), 0)
+
+// 256 samples take two passes of 128 frames; the word index runs on across
+// the boundary, so sample 128 is frame 128 and not frame 0.
+@test
+fn test_256_samples_take_two_passes_and_keep_their_order() [io, hw]
+    let l = link()
+    l.st.insert(6, 1)
+    for i in 0..256
+        l.words.insert(i * 2, (i + 1) * 256)
+        l.words.insert(i * 2 + 1, 0)
+    var buf: Vec[i32; 256] = Vec.new()
+    test.assert(inmp441.read_samples(l, cfg_l(), var buf, 256))
+    test.assert_eq(buf.len(), 256)
+    test.assert_eq(buf[0] as Int, 1)
+    test.assert_eq(buf[127] as Int, 128)
+    test.assert_eq(buf[128] as Int, 129)
+    test.assert_eq(buf[255] as Int, 256)
+    test.assert_eq(at(l.st, 11), 2)
+    test.assert_eq(at(l.st, 12), 256)
+    test.assert_eq(at(l.st, 7), 512)
+
+@test
+fn test_129_samples_take_a_second_pass_of_one_frame() [io, hw]
+    let l = link()
+    l.st.insert(6, 1)
+    for i in 0..129
+        l.words.insert(i * 2, (i + 1) * 256)
+    var buf: Vec[i32; 256] = Vec.new()
+    test.assert(inmp441.read_samples(l, cfg_l(), var buf, 129))
+    test.assert_eq(buf[128] as Int, 129)
+    test.assert_eq(at(l.st, 11), 2)
+    test.assert_eq(at(l.st, 12), 2)
+
+@test
+fn test_a_handle_that_answers_short_loses_the_read() [io, hw]
+    let l = link()
+    l.st.insert(6, 1)
+    l.st.insert(14, 2)
+    var buf: Vec[i32; 256] = Vec.new()
+    test.assert(not inmp441.read_samples(l, cfg_l(), var buf, 200))
+    test.assert_eq(buf.len(), 0)
+    let m = link()
+    m.st.insert(6, 1)
+    m.st.insert(14, 1)
+    test.assert(not inmp441.read_samples(m, cfg_l(), var buf, 10))
+    test.assert_eq(buf.len(), 0)
+
+// ── The Microphone trait ─────────────────────────────────────────────
+
+@test
+fn test_start_configures_the_handle_and_answers_the_start_up() [io, hw]
+    let l = link()
+    let m = inmp441.attach(l, cfg_l())
+    test.assert_eq(m.mic_start(), 85334)
+    test.assert_eq(at(l.st, 0), 1)
+    test.assert_eq(at(l.st, 1), 48000)
+    test.assert_eq(at(l.st, 2), 32)
+    test.assert_eq(at(l.st, 3), 2)
+    test.assert_eq(at(l.st, 4), 0)
+    test.assert_eq(at(l.st, 5), 0)
+    test.assert_eq(at(l.st, 6), 1)
+
+@test
+fn test_start_refuses_a_clock_the_part_cannot_take() [io, hw]
+    let l = link()
+    let m = inmp441.attach(l, inmp441.config_inmp441(60000, false))
+    test.assert_eq(m.mic_start(), -1)
+    test.assert_eq(at(l.st, 0), 0)
+    test.assert_eq(at(l.st, 6), 0)
+
+@test
+fn test_start_refuses_what_the_handle_refuses() [io, hw]
+    let l = link()
+    l.st.insert(8, 1)
+    let m = inmp441.attach(l, cfg_l())
+    test.assert_eq(m.mic_start(), -1)
+    test.assert_eq(at(l.st, 6), 0)
+    let k = link()
+    k.st.insert(13, 1)
+    let n = inmp441.attach(k, cfg_l())
+    test.assert_eq(n.mic_start(), -1)
+    test.assert_eq(at(k.st, 0), 1)
+
+@test
+fn test_read_before_start_is_refused_and_after_start_answers_n() [io, hw]
+    let l = link()
+    three_frames(l)
+    let m = inmp441.attach(l, cfg_l())
+    var buf: Vec[i32; 256] = Vec.new()
+    test.assert_eq(m.mic_read(var buf, 3), -1)
+    test.assert(m.mic_start() > 0)
+    test.assert_eq(m.mic_read(var buf, 3), 3)
+    test.assert_eq(buf[2] as Int, 768)
+    test.assert_eq(m.mic_read(var buf, 300), -1)
+
+@test
+fn test_stop_disables_the_handle_and_lost_reads_its_count() [io, hw]
+    let l = link()
+    let m = inmp441.attach(l, cfg_r())
+    test.assert(m.mic_start() > 0)
+    l.st.insert(9, 4)
+    test.assert_eq(m.mic_lost(), 4)
+    m.mic_stop()
+    test.assert_eq(at(l.st, 6), 0)
+    test.assert_eq(at(l.st, 10), 1)
+    var buf: Vec[i32; 256] = Vec.new()
+    test.assert_eq(m.mic_read(var buf, 1), -1)
+
+@test
+fn test_the_format_and_the_gain_of_the_trait() [io, hw]
+    let m = inmp441.attach(link(), cfg_l())
+    let f = m.mic_format()
+    test.assert_eq(f.bit_depth, 24)
+    test.assert_eq(f.channels, 1)
+    test.assert(m.mic_set_gain(MilliDb { mdb: 6000 }) == None)
+    test.assert(m.config().right == false)
+
+// ── The DC blocker ───────────────────────────────────────────────────
+
+fn filled(v: Int) -> Vec[i32; 256]
+    var b: Vec[i32; 256] = Vec.new()
+    for _i in 0..256
+        let _ = b.push(v as i32)
+    b
+
+// A constant offset is taken out: after 64000 samples of 1000 or of
+// -1000, fifteen time constants of 4096 samples, the output is 0, the
+// state carried across 250 buffers.
+@test
+fn test_a_constant_offset_is_removed_in_either_sign() [io]
+    for v in [1000, -1000]
+        var st = inmp441.dc_new()
+        var buf = filled(v)
+        for _k in 0..250
+            buf = filled(v)
+            st = inmp441.dc_block(st, var buf, 256)
+        test.assert_eq(buf[0] as Int, 0)
+        test.assert_eq(buf[255] as Int, 0)
+
+// The first samples are the input less an estimate that has not moved:
+// 1000 x 2^16 / 4096 = 16000, rounded in, is below one count.
+@test
+fn test_the_blocker_starts_from_zero_and_the_state_carries() [io]
+    let st = inmp441.dc_new()
+    test.assert_eq(st.est, 0)
+    var a = filled(1000)
+    let s1 = inmp441.dc_block(st, var a, 128)
+    test.assert_eq(a[0] as Int, 1000)
+    test.assert(s1.est > 0)
+    var b = filled(1000)
+    let s2 = inmp441.dc_block(s1, var b, 128)
+    test.assert(s2.est > s1.est)
+    var whole = filled(1000)
+    let s3 = inmp441.dc_block(st, var whole, 256)
+    test.assert_eq(s3.est, s2.est)
+    test.assert_eq(whole[128] as Int, b[0] as Int)
+    test.assert_eq(whole[255] as Int, b[127] as Int)
+
+@test
+fn test_the_blocker_stops_at_the_end_of_the_buffer_or_at_n() [io]
+    var short: Vec[i32; 256] = Vec.new()
+    let _ = short.push(7 as i32)
+    let _ = short.push(7 as i32)
+    let s = inmp441.dc_block(inmp441.dc_new(), var short, 50)
+    test.assert_eq(short.len(), 2)
+    test.assert(s.est > 0)
+    var buf = filled(500)
+    let t = inmp441.dc_block(inmp441.dc_new(), var buf, 1)
+    test.assert_eq(buf[1] as Int, 500)
+    test.assert(t.est > 0)

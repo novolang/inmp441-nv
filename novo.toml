@@ -1,0 +1,31 @@
+[package]
+name        = "inmp441-nv"
+version     = "0.1.0"
+description = "A driver for the INMP441 and the SPH0645LM4H, MEMS microphones with an I2S output and no control bus, over a board's I2S handle: the frame the part sends, 24-bit samples unpacked from the 32-bit slot, the slot the L/R pin names, the start-up time and an optional DC blocker, as devices-nv's Microphone."
+license     = "Apache-2.0"
+stability   = "experimental"
+category    = "embedded"
+layer       = "host"
+tags        = ["inmp441", "sph0645", "sph0645lm4h", "microphone", "mems", "i2s", "audio", "nrf52840-dk", "nrf54lm20-dk"]
+repository  = "https://github.com/novolang/inmp441-nv"
+maintainers = ["novo-lang"]
+novo        = ">= 0.24.0"
+
+[docs.pages]
+"README.md" = "Capturing sound from an INMP441 or an SPH0645LM4H on an I2S handle"
+
+# Every module of the package checks at the embedded tier, so a program
+# of any tier, embedded, rt or system, may call it.
+[tier]
+tier = "embedded"
+
+# The device program, examples/mic_level.nv, has no [[bin]] entry: an
+# entry makes the registry list the package as a program.
+# tests/device_build.sh builds the program for two boards as the main of a
+# scratch package that depends on this one.
+
+[dependencies]
+# The I2s trait and the settings the handle is configured with.
+embedded-hal-nv = { path = "../embedded-hal-nv" }
+# The Microphone trait and the AudioFormat it answers.
+devices-nv      = { path = "../devices-nv" }

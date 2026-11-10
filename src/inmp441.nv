@@ -1,0 +1,289 @@
+// inmp441 — the INMP441 and the SPH0645LM4H, two MEMS microphones with an
+// I2S output and no control bus, as devices-nv's `Microphone`.
+//
+// The facts below are from TDK InvenSense's data sheet "INMP441:
+// Omnidirectional Microphone with Bottom Port and I2S Digital Output",
+// document DS-INMP441-00, Revision 1.1, 05/21/2014, and from Knowles'
+// "SPH0645LM4H-B Rev B Datasheet I2S Output Digital Microphone".  Where a
+// reference driver differs, the site says which was taken.
+//
+// A microphone with no registers has no driver in the usual sense.  What
+// a program needs from the package is the description of the I2S frame
+// the part sends, which the board's `I2s` handle has to be set to, and
+// the arithmetic that turns the words of that frame into samples:
+//
+//   * Both parts are I2S slaves.  The master gives SCK and WS, and the
+//     part sends 64 SCK cycles per stereo frame, 32 per word.  The
+//     INMP441 requires exactly 64 (fSCK = 64 x fWS, fSCK 0.5 to 3.2 MHz,
+//     fWS 7.8 to 50 kHz).  The SPH0645LM4H fixes the same ratio and
+//     takes fCLK 2.048 to 4.096 MHz, which is 32 to 64 kHz.  The package
+//     therefore sets the `I2s` handle to a 32-bit depth, two channels,
+//     the board as master, in the Philips format: the first bit of a word
+//     comes one SCK cycle after the WS edge (data sheet, "Data-Word
+//     Format").
+//   * The word is 24 bits, two's complement, MSB first, in the top of
+//     the 32-bit slot.  The INMP441 tri-states SD "immediately after the
+//     LSB", so the last eight bits of the slot are not driven: a pull-down
+//     or the last level on the line, not data.  Fix kept: the code that
+//     reads the slot as a 32-bit sample gets noise in its low byte;
+//     `unpack` shifts the byte away.
+//   * The SPH0645LM4H sends 18 significant bits and fills the other six
+//     of its 24 with zeros.
+//   * The part sends only in the slot its L/R (INMP441) or SELECT
+//     (SPH0645) pin names: low is the left slot, high the right one.  The
+//     other slot of the frame is high impedance, so the driver keeps one
+//     sample of every two.
+//   * Start-up.  The INMP441 outputs zero for the first 2^18 SCK cycles
+//     after power is applied, 85 ms at 3.072 MHz, and resumes 2^14 cycles
+//     (5 ms at 3.072 MHz) after SCK restarts from standby.  The
+//     SPH0645LM4H powers up in 50 ms at most.
+//   * The INMP441 filters DC itself, with a high-pass filter at 3.7 Hz
+//     (-3 dB at 48 kHz).  The data sheet gives no offset in the output
+//     word.  The SPH0645LM4H data sheet gives none either; a constant
+//     offset is a property of a unit and the caller's to measure, so
+//     `MicConfig.dc_offset` is the number subtracted from every sample.
+//
+// The `Microphone` trait holds the part's state in the `I2s` handle: a
+// `self` receiver cannot change a field.  The reading of "not started" is
+// therefore the handle's, which refuses a `receive` before `enable`; the
+// lost buffers are the handle's `xruns`.  A filter that needs a state
+// between calls is a function over a state the caller holds (`dc_block`).
+//
+// What this package does not do, because the trait or the part gives no
+// place for it: the edge of SCK the receiver samples SD on (the
+// SPH0645LM4H changes SD 66 ns after the rising edge and holds it 7 ns,
+// so a receiver that samples late reads a word shifted by a bit; the edge
+// is a property of the board's I2S block, `MicConfig.late_bits` only
+// undoes a shift the caller has measured), the PDM microphones, and the
+// synchronisation of two microphones on one line.
+
+use embedded_hal.{ I2s, I2sConfig, I2sRole, I2sFormat }
+use dev_audio.{ AudioFormat, AudioFraming, Microphone }
+
+// The part, which fixes the number of significant bits, the clock range
+// and the start-up time.
+pub @value
+enum MicPart
+    MicInmp441
+    MicSph0645
+
+// What a program says about the microphone it wired.
+//
+// `sample_rate` is the word clock in hertz.  `right` is whether the
+// L/R or SELECT pin is high, so the part sends in the right slot.
+// `dc_offset` is subtracted from every sample, in counts of the
+// 24-bit output.  `standby_wake` is whether the part has power and its
+// clock was only stopped, which makes the INMP441 valid sooner.
+// `late_bits` is the number of bits the receiver reads the word late, 0
+// for a receiver that samples SD on the right edge.
+pub @value
+struct MicConfig
+    part: MicPart
+    sample_rate: Int
+    right: Bool
+    dc_offset: Int
+    standby_wake: Bool
+    late_bits: Int
+
+// The bits of one slot: both parts send 32 SCK cycles per word.
+let SLOT_BITS = 32
+// The bits of the output sample: the 24 of the part's word.
+let OUT_BITS = 24
+// The most frames one pass reads: a stereo buffer holds 256 samples.
+let PASS_FRAMES = 128
+// The INMP441's start-up, in SCK cycles: 2^18 from power-up, 2^14 from
+// standby.
+let INMP441_COLD_CYCLES = 262144
+let INMP441_WARM_CYCLES = 16384
+// The SPH0645LM4H's power-up time, at most, in microseconds.
+let SPH0645_STARTUP_US = 50000
+
+// A configuration for an INMP441 at `rate` hertz, with its L/R pin high
+// when `right` is true, and no offset removed.
+pub fn config_inmp441(rate: Int, right: Bool) -> MicConfig
+    MicConfig { part: MicPart.MicInmp441, sample_rate: rate, right: right, dc_offset: 0,
+                standby_wake: false, late_bits: 0 }
+
+// A configuration for an SPH0645LM4H at `rate` hertz, with its SELECT pin
+// high when `right` is true, and no offset removed.
+pub fn config_sph0645(rate: Int, right: Bool) -> MicConfig
+    MicConfig { part: MicPart.MicSph0645, sample_rate: rate, right: right, dc_offset: 0,
+                standby_wake: false, late_bits: 0 }
+
+// ── The frame ────────────────────────────────────────────────────────
+
+// The bit clock the part sees, in hertz: 64 cycles per frame.
+pub fn sck_hz(c: MicConfig) -> Int
+    c.sample_rate * SLOT_BITS * 2
+
+// Whether the part takes the clock the configuration implies.  The
+// INMP441 takes fSCK from 0.5 to 3.2 MHz (Table 3), the SPH0645LM4H from
+// 2.048 to 4.096 MHz.
+pub fn rate_ok(c: MicConfig) -> Bool
+    let f = sck_hz(c)
+    match c.part
+        MicPart.MicInmp441  => f >= 500000 and f <= 3200000
+        MicPart.MicSph0645  => f >= 2048000 and f <= 4096000
+
+// The settings the board's `I2s` handle gets: 32-bit slots, two channels,
+// the board driving the clocks, Philips framing.
+pub fn i2s_config_of(c: MicConfig) -> I2sConfig
+    I2sConfig { sample_rate: c.sample_rate, bit_depth: SLOT_BITS, channels: 2,
+                role: I2sRole.I2sMaster, format: I2sFormat.I2sPhilips }
+
+// The format of the samples the microphone delivers: 24 bits in the low
+// bits of an `Int`, one channel.  The SPH0645LM4H's six unused bits are
+// zero in them.
+pub fn format_of(c: MicConfig) -> AudioFormat
+    AudioFormat { sample_rate: c.sample_rate, bit_depth: OUT_BITS, channels: 1,
+                  framing: AudioFraming.AudioPhilips, codec_is_master: false }
+
+// How long until the output is valid, in microseconds.  The INMP441
+// counts SCK cycles, so the time follows the rate: 2^18 cycles from
+// power-up, 85.3 ms at 48 kHz and 256 ms at 16 kHz.  The cycles are
+// 64 per word clock, so the time is 2^18 x 1e6 / (64 x fs).
+pub fn startup_us(c: MicConfig) -> Int
+    match c.part
+        MicPart.MicSph0645 => SPH0645_STARTUP_US
+        MicPart.MicInmp441 => inmp441_startup_us(c)
+
+// The INMP441's start-up for a rate, rounded up to a microsecond.
+fn inmp441_startup_us(c: MicConfig) -> Int
+    var cycles = INMP441_COLD_CYCLES
+    if c.standby_wake
+        cycles = INMP441_WARM_CYCLES
+    let sck = sck_hz(c)
+    (cycles * 1000000 + sck - 1) / sck
+
+// ── The samples ──────────────────────────────────────────────────────
+
+// The sample for one 32-bit slot word `raw`, sign-extended in an `Int`:
+// the word is shifted down by the eight bits the part does not drive, and
+// the bits the receiver read late are shifted off.  The SPH0645LM4H's six
+// zero bits are cleared, so a stray bit in them is not a sample.  The
+// configured offset is subtracted last.
+pub fn unpack(c: MicConfig, raw: Int) -> Int
+    var s = raw >> (SLOT_BITS - OUT_BITS + c.late_bits)
+    if c.part == MicPart.MicSph0645
+        s = (s >> 6) << 6
+    s - c.dc_offset
+
+// The slot of the frame the part sends in: 0 for the left, 1 for the
+// right.
+pub fn slot_of(c: MicConfig) -> Int
+    if c.right
+        return 1
+    0
+
+// Replaces `dst` with `n` samples from `i2s`, taking the part's slot of
+// each stereo frame: whether the handle delivered them all.  A frame is two
+// words, so a pass reads at most 128 frames and `n` up to 256 takes two.
+// `dst` is empty on a refusal.
+pub fn read_samples<S: I2s>(i2s: S, c: MicConfig, var dst: Vec[i32; 256], n: Int) -> Bool [hw]
+    dst.clear()
+    if n < 0 or n > 256
+        return false
+    var raw: Vec[i32; 256] = Vec.new()
+    let slot = slot_of(c)
+    var left = n
+    for _pass in 0..2
+        var take = left
+        if take > PASS_FRAMES
+            take = PASS_FRAMES
+        if take > 0
+            if i2s.receive(var raw, take * 2) != take * 2
+                dst.clear()
+                return false
+            for k in 0..take
+                let _ = dst.push(unpack(c, raw[k * 2 + slot] as Int) as i32)
+            left = left - take
+    true
+
+// ── The DC blocker ───────────────────────────────────────────────────
+
+// The state of the optional DC blocker: the running estimate of the
+// offset, in 1/65536 of a count.
+pub @value
+struct DcState
+    est: Int
+
+// A blocker at rest, with the estimate at zero.
+pub fn dc_new() -> DcState
+    DcState { est: 0 }
+
+// The shift of the blocker: the estimate follows each sample by 2^-12 of
+// the distance between them, a time constant of 4096 samples, 0.26 s at
+// 16 kHz and 85 ms at 48 kHz.
+let DC_SHIFT = 12
+// The estimate keeps 16 fractional bits, so that it settles within a
+// 65536th of a count of a constant offset; the step is rounded and so is
+// the estimate subtracted, which leaves no bias of one count for a
+// positive offset.
+let DC_FRAC = 16
+let DC_ROUND = 2048
+let DC_HALF = 32768
+
+// Removes a slowly moving offset from the first `n` samples of `buf`, in
+// place, and answers the state after them.  The estimate follows each
+// sample and the sample is replaced by itself less the estimate.  The
+// state is the caller's because the `Microphone` trait gives a driver
+// none: a program keeps it from one buffer to the next.
+pub fn dc_block(st: DcState, var buf: Vec[i32; 256], n: Int) -> DcState
+    var k = n
+    if k > buf.len()
+        k = buf.len()
+    var est = st.est
+    for i in 0..k
+        let x = buf[i] as Int
+        est = est + (((x << DC_FRAC) - est + DC_ROUND) >> DC_SHIFT)
+        buf[i] = (x - ((est + DC_HALF) >> DC_FRAC)) as i32
+    DcState { est: est }
+
+// ── The part on an I2S handle ────────────────────────────────────────
+
+// A microphone on the board's `I2s` handle.  The handle is configured and
+// enabled by `mic_start` and disabled by `mic_stop`.
+pub struct Inmp441<S: I2s>
+    i2s: S
+    cfg: MicConfig
+
+// The microphone configured by `cfg` on `i2s`.  Nothing is sent.  A
+// struct with a generic field cannot be a `@value`, so the microphone is
+// one cell of the arena, built here in a `system` block, the one
+// allocation of the package; it is released when the last reference to it
+// goes.
+pub fn attach<S: I2s>(i2s: S, cfg: MicConfig) -> Inmp441<S>
+    system
+        return Inmp441 { i2s: i2s, cfg: cfg }
+
+impl Inmp441
+    // The configuration.
+    fn config(self) -> MicConfig
+        self.cfg
+
+impl Microphone[hw] for Inmp441
+    fn mic_format(self) -> AudioFormat [hw]
+        format_of(self.cfg)
+
+    // Configures and enables the handle, and answers the microseconds
+    // until the output is valid, or -1 when the clock is outside the
+    // part's range or the handle refused.
+    fn mic_start(self) -> Int [hw]
+        if not rate_ok(self.cfg)
+            return -1
+        if not self.i2s.configure(i2s_config_of(self.cfg))
+            return -1
+        if not self.i2s.enable()
+            return -1
+        startup_us(self.cfg)
+
+    fn mic_stop(self) [hw]
+        self.i2s.disable()
+
+    fn mic_read(self, var buf: Vec[i32; 256], n: Int) -> Int [hw]
+        if not read_samples(self.i2s, self.cfg, var buf, n)
+            return -1
+        n
+
+    fn mic_lost(self) -> Int [hw]
+        self.i2s.xruns()

@@ -1,0 +1,116 @@
+/* mic_level.nv: a capture loop that prints the peak level of an INMP441
+ * ten times a second
+ *
+ * Build:  bash tests/device_build.sh   (the package's own script)
+ *         or make this file the main of a package that depends on
+ *         inmp441-nv and run
+ *             novo build --target=nrf52840-dk src/main.nv
+ * Run:    probe-rs run --chip nRF52840_xxAA main.elf
+ *
+ * NOT a `novo run` program: it targets a board and never ends.
+ *
+ * The part is an INMP441 on a breakout board, wired to the board's I2S
+ * pins: SCK and WS from the board, SD to the board's data input, L/R to
+ * ground (the left slot), CHIPEN and VDD to 3.3 V, and a 100 kohm
+ * pull-down on SD if the breakout has none.  The board is the I2S master
+ * at 16 kHz.  A line looks like
+ *
+ *     peak 18432 of 8388608
+ *
+ * where the second number is the full scale of the 24-bit sample.  In a
+ * quiet room the peak is a few thousand; speaking next to the part drives
+ * it up by a factor of fifty or more.
+ *
+ * The program reads the microphone through devices-nv's `Microphone`
+ * trait: `mic_start` configures and enables the I2S block and answers how
+ * long the part takes to settle, the program waits that long, and
+ * `mic_read` answers 256 samples at a time.
+ *
+ * Effects the program declares: [hw], for the I2S block, the UART and the
+ * timer.  The driver allocates one cell at `attach`; the program
+ * allocates nothing after it starts.
+ *
+ * The I2S block: neither the nRF52840-DK's nor the nRF54LM20-DK's board
+ * package has an I2S block driver yet, and embedded-hal-nv has no board
+ * handle for one.  The program is therefore written against the `I2s`
+ * trait and is given `NoI2s`, a stand-in that refuses to be configured,
+ * so the program builds for both boards and prints "refused" at run time.
+ * A board package that gives a handle implementing `I2s` replaces the one
+ * argument of `attach`.  The part has not been read on a board.
+ */
+use embedded_hal.{ I2s, I2sConfig }
+use dev_audio.{ Microphone }
+use inmp441
+
+// The stand-in for a board's I2S block that is not there.
+@value
+struct NoI2s
+    id: Int
+
+impl I2s for NoI2s
+    fn configure(self, c: I2sConfig) -> Bool [hw]
+        false
+
+    fn sample_rate(self) -> Int [hw]
+        0
+
+    fn enable(self) -> Bool [hw]
+        false
+
+    fn disable(self) [hw]
+        pass
+
+    fn transmit(self, var buf: Vec[i32; 256]) -> Int [hw]
+        -1
+
+    fn receive(self, var buf: Vec[i32; 256], n: Int) -> Int [hw]
+        -1
+
+    fn xruns(self) -> Int [hw]
+        0
+
+// Writes `n`, 0 or more, in decimal.  Formatting into a string would
+// allocate, which @tier(embedded) refuses, so each digit goes out as a
+// byte.  An Int has at most 19 decimal digits, which bounds both loops.
+@tier(embedded)
+fn digits(n: Int) [hw]
+    var div = 1
+    for _k in 0..18
+        if div <= n / 10
+            div = div * 10
+    for _k in 0..19
+        if div > 0
+            hal.uart.write_byte(48 + (n / div) % 10)
+            div = div / 10
+
+// The largest magnitude among the first `n` samples.
+@tier(embedded)
+fn peak_of(buf: Vec[i32; 256], n: Int) -> Int
+    var peak = 0
+    for i in 0..n
+        var v = buf[i] as Int
+        if v < 0
+            v = 0 - v
+        if v > peak
+            peak = v
+    peak
+
+@tier(embedded)
+fn main() [hw]
+    bsp.board.init()
+    let mic = inmp441.attach(NoI2s { id: 0 }, inmp441.config_inmp441(16000, false))
+    let settle_us = mic.mic_start()
+    if settle_us < 0
+        hal.uart.write("refused\n")
+    else
+        hal.timer.delay_ms(settle_us / 1000 + 1)
+    var buf: Vec[i32; 256] = Vec.new()
+    while true
+        let n = mic.mic_read(var buf, 256)
+        if n > 0
+            hal.uart.write("peak ")
+            digits(peak_of(buf, n))
+            hal.uart.write(" of ")
+            digits(8388608)
+            hal.uart.write("\n")
+        hal.timer.delay_ms(100)
