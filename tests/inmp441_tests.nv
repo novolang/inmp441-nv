@@ -388,7 +388,7 @@ fn test_the_format_and_the_gain_of_the_trait() [io, hw]
     test.assert_eq(f.bit_depth, 24)
     test.assert_eq(f.channels, 1)
     test.assert(m.mic_set_gain(MilliDb { mdb: 6000 }) == None)
-    test.assert(m.config().right == false)
+    test.assert(not m.config().right)
 
 // ── The DC blocker ───────────────────────────────────────────────────
 
