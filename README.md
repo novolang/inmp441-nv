@@ -98,8 +98,8 @@ probe-rs run --chip nRF52840_xxAA main.elf
 
 | Image | Flash | Of which program | RAM (`.data` and `.bss`) |
 |---|---|---|---|
-| `nrf52840-dk` | 11,172 B | 934 B | 2,624 B |
-| `nrf54lm20-dk` | 12,492 B | 1,254 B | 2,624 B |
+| `nrf52840-dk` | 11,108 B | 934 B | 2,624 B |
+| `nrf54lm20-dk` | 12,428 B | 1,254 B | 2,624 B |
 
 The numbers are from the build's memory report. Flash also holds the
 runtime, the compiler's support library and the program's tables. The

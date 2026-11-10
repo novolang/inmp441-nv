@@ -26,7 +26,7 @@ microphones with an I2S output and no control bus.
 - The suite runs over a double of the `I2s` handle and covers every line of
   `src/`.
 - The device program `examples/mic_level.nv`, a peak meter. Built for the
-  nRF52840-DK it is 11,172 B of flash and for the nRF54LM20-DK 12,492 B.
+  nRF52840-DK it is 11,108 B of flash and for the nRF54LM20-DK 12,428 B.
 
 ### Known
 
