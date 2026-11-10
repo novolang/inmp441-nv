@@ -26,6 +26,6 @@ tier = "embedded"
 
 [dependencies]
 # The I2s trait and the settings the handle is configured with.
-embedded-hal-nv = { path = "../embedded-hal-nv" }
+embedded-hal-nv = "^0.3.3"
 # The Microphone trait and the AudioFormat it answers.
-devices-nv      = { path = "../devices-nv" }
+devices-nv      = "^0.3.3"

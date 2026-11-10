@@ -33,8 +33,8 @@ microphones with an I2S output and no control bus.
 - Hardware verification: NOT VERIFIED. No board carries either microphone,
   and no board package has an I2S block. The device program is given a
   stand-in handle that refuses to be configured, and prints `refused`.
-- The manifest names devices-nv and embedded-hal-nv by path: `Microphone`
-  and `I2s` are in the 0.3.3 releases, which are not on the registry.
+- The manifest names devices-nv and embedded-hal-nv by the registry range
+  `^0.3.3`, the first releases with `Microphone` and `I2s`.
 - Not implemented: the sampling edge of SCK (the `I2s` trait has no field
   for it), the async form of `Microphone`, and the PDM microphones.
 - The data sheets give no DC offset for either part. `dc_offset` is the
