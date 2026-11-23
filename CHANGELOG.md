@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.1 — 2026-11-23
+
+The package asks for embedded-hal-nv ^0.4.0 (was ^0.3.3) and devices-nv ^0.4.0 (was ^0.3.3), the minor of both trait packages that the other drivers and the board packages ask for, so one version of each serves a program that takes this package beside any of them.  Under the older ranges, a program that named this package and a driver on 0.4 stopped with "no version of 'embedded-hal-nv' satisfies every requirement".
+
+No signature of the package changed.  The record literals the part builds carry the field that embedded-hal-nv 0.4.0 and devices-nv 0.4.0 add: `i2s_config_of` gives `I2sConfig` a `slot_bits` of 0, a slot as wide as the 32-bit sample, and `format_of` gives `AudioFormat` a `slot_bits` of 32, the slot the 24-bit sample sits in.
+
+The device program builds for the boards its README names, flash nrf52840-dk 7,140 B before and 7,068 B after; nrf54lm20-dk 8,460 B before and 8,388 B after; nrf52-qemu 8,072 B before and 7,996 B after.
+
 ## 0.1.0
 
 The first release: a driver for the INMP441 and the SPH0645LM4H, MEMS

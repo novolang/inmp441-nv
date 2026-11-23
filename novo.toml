@@ -1,6 +1,6 @@
 [package]
 name        = "inmp441-nv"
-version     = "0.1.0"
+version     = "0.1.1"
 description = "A driver for the INMP441 and the SPH0645LM4H, MEMS microphones with an I2S output and no control bus, over a board's I2S handle: the frame the part sends, 24-bit samples unpacked from the 32-bit slot, the slot the L/R pin names, the start-up time and an optional DC blocker, as devices-nv's Microphone."
 license     = "Apache-2.0"
 stability   = "experimental"
@@ -26,6 +26,6 @@ tier = "embedded"
 
 [dependencies]
 # The I2s trait and the settings the handle is configured with.
-embedded-hal-nv = "^0.3.3"
+embedded-hal-nv = "^0.4.0"
 # The Microphone trait and the AudioFormat it answers.
-devices-nv      = "^0.3.3"
+devices-nv      = "^0.4.0"

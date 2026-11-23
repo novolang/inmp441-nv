@@ -129,14 +129,15 @@ pub fn rate_ok(c: MicConfig) -> Bool
 // the board driving the clocks, Philips framing.
 pub fn i2s_config_of(c: MicConfig) -> I2sConfig
     I2sConfig { sample_rate: c.sample_rate, bit_depth: SLOT_BITS, channels: 2,
-                role: I2sRole.I2sMaster, format: I2sFormat.I2sPhilips }
+                role: I2sRole.I2sMaster, format: I2sFormat.I2sPhilips, slot_bits: 0 }
 
 // The format of the samples the microphone delivers: 24 bits in the low
-// bits of an `Int`, one channel.  The SPH0645LM4H's six unused bits are
-// zero in them.
+// bits of an `Int`, one channel, from a 32-bit slot of the frame.  The
+// SPH0645LM4H's six unused bits are zero in them.
 pub fn format_of(c: MicConfig) -> AudioFormat
     AudioFormat { sample_rate: c.sample_rate, bit_depth: OUT_BITS, channels: 1,
-                  framing: AudioFraming.AudioPhilips, codec_is_master: false }
+                  framing: AudioFraming.AudioPhilips, codec_is_master: false,
+                  slot_bits: SLOT_BITS }
 
 // How long until the output is valid, in microseconds.  The INMP441
 // counts SCK cycles, so the time follows the rate: 2^18 cycles from

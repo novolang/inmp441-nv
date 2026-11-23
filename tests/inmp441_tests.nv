@@ -139,12 +139,16 @@ fn test_the_i2s_settings_and_the_format_of_the_samples() [io]
     test.assert_eq(c.channels, 2)
     test.assert(c.role == I2sRole.I2sMaster)
     test.assert(c.format == I2sFormat.I2sPhilips)
+    // A slot as wide as the 32-bit sample the board's handle moves.
+    test.assert_eq(c.slot_bits, 0)
     let f = inmp441.format_of(cfg_l())
     test.assert_eq(f.sample_rate, 48000)
     test.assert_eq(f.bit_depth, 24)
     test.assert_eq(f.channels, 1)
     test.assert(f.framing == AudioFraming.AudioPhilips)
     test.assert(not f.codec_is_master)
+    // The 24-bit sample sits in a 32-bit slot of the frame.
+    test.assert_eq(f.slot_bits, 32)
 
 // 2^18 cycles at 3.072 MHz is 85.33 ms, rounded up to a microsecond; at
 // 16 kHz the clock is 1.024 MHz and the time 256 ms exactly.  From
